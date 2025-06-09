@@ -102,8 +102,8 @@ impl TxnSenderImpl {
                         transactions.sort_by(|(_, a), (_, b)| a.retry_count.cmp(&b.retry_count));
                         let transactions_to_remove = transactions[(max_size + 1)..].to_vec();
                         for (signature, _) in transactions_to_remove {
-                            transaction_store.remove_transaction(signature.clone());
                             transaction_store.add_failed(signature.clone(), msg.clone());
+                            transaction_store.remove_transaction(signature.clone());
                             transaction_map.remove(&signature);
                         }
                         let records_dropped = queue_length - max_size;
@@ -133,42 +133,42 @@ impl TxnSenderImpl {
                         let leader = Arc::new(leader.clone());
                         let wire_transaction = wire_transaction.clone();
                         txn_sender_runtime.spawn(async move {
-                        // retry unless its a timeout
-                        for i in 0..SEND_TXN_RETRIES {
-                            let conn = connection_cache 
-                                .get_nonblocking_connection(&leader.tpu_quic.unwrap());
-                            if let Ok(result) = timeout(MAX_TIMEOUT_SEND_DATA_BATCH, conn.send_data(&wire_transaction)).await {
-                                if let Err(e) = result {
-                                    if i == SEND_TXN_RETRIES-1 {
-                                        error!(
+                            // retry unless its a timeout
+                            for i in 0..SEND_TXN_RETRIES {
+                                let conn = connection_cache
+                                    .get_nonblocking_connection(&leader.tpu_quic.unwrap());
+                                if let Ok(result) = timeout(MAX_TIMEOUT_SEND_DATA_BATCH, conn.send_data(&wire_transaction)).await {
+                                    if let Err(e) = result {
+                                        if i == SEND_TXN_RETRIES - 1 {
+                                            error!(
                                             retry = "true",
                                             "Failed to send transaction batch to {:?}: {}",
                                             leader, e
                                         );
-                                        statsd_count!("transaction_send_error", 1, "retry" => "true", "last_attempt" => "true");
+                                            statsd_count!("transaction_send_error", 1, "retry" => "true", "last_attempt" => "true");
+                                        } else {
+                                            statsd_count!("transaction_send_error", 1, "retry" => "true", "last_attempt" => "false");
+                                        }
                                     } else {
-                                        statsd_count!("transaction_send_error", 1, "retry" => "true", "last_attempt" => "false");
-                                    }
-                                } else {
-                                    let leader_num_str = leader_num.to_string();
-                                    statsd_time!(
+                                        let leader_num_str = leader_num.to_string();
+                                        statsd_time!(
                                         "transaction_received_by_leader",
                                         sent_at.elapsed(), "leader_num" => &leader_num_str, "api_key" => "not_applicable", "retry" => "true");
-                                    return;
+                                        return;
+                                    }
+                                } else {
+                                    // Note: This is far too frequent to log. It will fill the disks on the host and cost too much on DD.
+                                    statsd_count!("transaction_send_timeout", 1);
                                 }
-                            } else {
-                                // Note: This is far too frequent to log. It will fill the disks on the host and cost too much on DD.
-                                statsd_count!("transaction_send_timeout", 1);
                             }
-                        }
-                    });
+                        });
                         leader_num += 1;
                     }
                 }
                 // remove transactions that reached max retries
                 for signature in transactions_reached_max_retries {
-                    let _ = transaction_store.remove_transaction(signature.clone());
-                    transaction_store.add_failed(signature, String::from("transaction reached max retries"));
+                    transaction_store.add_failed(signature.clone(), String::from("transaction reached max retries"));
+                    let _ = transaction_store.remove_transaction(signature);
                     statsd_count!("transactions_reached_max_retries", 1);
                 }
                 sleep(Duration::from_secs(txn_send_retry_interval_seconds as u64)).await;
@@ -200,7 +200,12 @@ impl TxnSenderImpl {
             .unwrap_or("none".to_string());
         self.txn_sender_runtime.spawn(async move {
             let confirmed_at = solana_rpc.confirm_transaction(signature.clone()).await;
-            let transaction_data = transaction_store.remove_transaction(signature.clone());
+            if !confirmed_at.is_some() {
+                // Prepopulate `failed_transaction` entry to prevent any potential race condition
+                transaction_store.add_failed(signature.clone(), String::from("transaction not landed"));
+            }
+            let transaction_data = transaction_store.remove_transaction(signature);
+
             let mut retries = None;
             let mut max_retries = None;
             if let Some(transaction_data) = transaction_data {
@@ -222,7 +227,6 @@ impl TxnSenderImpl {
                 statsd_count!("transactions_not_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_not_landed_by_key", 1, "api_key" => &api_key);
                 statsd_count!("transactions_not_landed_retries", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
-                transaction_store.add_failed(signature, String::from("transaction not landed"));
                 "false"
             };
             statsd_time!("transaction_priority", priority, "landed" => &landed);
@@ -301,17 +305,17 @@ impl TxnSender for TxnSenderImpl {
                     let conn =
                         connection_cache.get_nonblocking_connection(&leader.tpu_quic.unwrap());
                     if let Ok(result) = timeout(MAX_TIMEOUT_SEND_DATA, conn.send_data(&wire_transaction)).await {
-                            if let Err(e) = result {
-                                if i == SEND_TXN_RETRIES-1 {
-                                    error!(
+                        if let Err(e) = result {
+                            if i == SEND_TXN_RETRIES - 1 {
+                                error!(
                                         retry = "false",
                                         "Failed to send transaction to {:?}: {}",
                                         leader, e
                                     );
-                                    statsd_count!("transaction_send_error", 1, "retry" => "false", "last_attempt" => "true");
-                                } else {
-                                    statsd_count!("transaction_send_error", 1, "retry" => "false", "last_attempt" => "false");
-                                }
+                                statsd_count!("transaction_send_error", 1, "retry" => "false", "last_attempt" => "true");
+                            } else {
+                                statsd_count!("transaction_send_error", 1, "retry" => "false", "last_attempt" => "false");
+                            }
                         } else {
                             let leader_num_str = leader_num.to_string();
                             statsd_time!(
