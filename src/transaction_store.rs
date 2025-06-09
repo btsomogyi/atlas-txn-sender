@@ -23,25 +23,27 @@ pub trait TransactionStore: Send + Sync {
     fn remove_transaction(&self, signature: String) -> Option<TransactionData>;
     fn get_transactions(&self) -> Arc<DashMap<String, TransactionData>>;
     fn has_signature(&self, signature: &str) -> bool;
+    fn add_failed(&self, signature: String, error: String);
+    fn has_failed(&self, signature: &str) -> bool;
+    fn remove_failed(&self, signature: String) -> Option<String>;
 }
 
 pub struct TransactionStoreImpl {
     transactions: Arc<DashMap<String, TransactionData>>,
+    failed_transactions: Arc<DashMap<String, String>>,
 }
 
 impl TransactionStoreImpl {
     pub fn new() -> Self {
         let transaction_store = Self {
             transactions: Arc::new(DashMap::new()),
+            failed_transactions: Arc::new(DashMap::new()),
         };
         transaction_store
     }
 }
 
 impl TransactionStore for TransactionStoreImpl {
-    fn has_signature(&self, signature: &str) -> bool {
-        self.transactions.contains_key(signature)
-    }
     fn add_transaction(&self, transaction: TransactionData) {
         let start = Instant::now();
         if let Some(signature) = get_signature(&transaction) {
@@ -72,6 +74,22 @@ impl TransactionStore for TransactionStoreImpl {
     }
     fn get_transactions(&self) -> Arc<DashMap<String, TransactionData>> {
         self.transactions.clone()
+    }
+    fn has_signature(&self, signature: &str) -> bool {
+        self.transactions.contains_key(signature)
+    }
+    fn add_failed(&self, signature: String, error: String) {
+        if self.transactions.contains_key(&signature) {
+            return;
+        }
+        self.failed_transactions.insert(signature, error);
+    }
+    fn has_failed(&self, signature: &str) -> bool {
+        self.failed_transactions.contains_key(signature)
+    }
+    fn remove_failed(&self, signature: String) -> Option<String> {
+        let error = self.failed_transactions.remove(&signature);
+        error.map_or(None, |t| Some(t.1))
     }
 }
 

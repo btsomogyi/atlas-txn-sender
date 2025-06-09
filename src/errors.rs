@@ -1,11 +1,19 @@
 use std::error::Error;
 
-use jsonrpsee::types::{error::INVALID_PARAMS_CODE, ErrorObjectOwned};
+use jsonrpsee::types::{error::INVALID_PARAMS_CODE, error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 
 pub fn invalid_request(reason: &str) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         INVALID_PARAMS_CODE,
         format!("Invalid Request: {reason}"),
+        None::<String>,
+    )
+}
+
+pub fn failed_transaction(reason: &str) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        CALL_EXECUTION_FAILED_CODE,
+        format!("Failed Transaction: {reason}"),
         None::<String>,
     )
 }

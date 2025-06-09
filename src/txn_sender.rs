@@ -90,11 +90,11 @@ impl TxnSenderImpl {
                 // Shed transactions by retry_count, if necessary.
                 if let Some(max_size) = max_retry_queue_size {
                     if queue_length > max_size {
-                        warn!(
-                            "Transaction retry queue length is over the limit of {}: {}. Load shedding transactions with highest retry count.", 
+                        let msg = format!(
+                            "Transaction retry queue length is over the limit of {}: {}. Load shedding transactions with highest retry count.",
                             max_size,
-                            queue_length
-                        );
+                            queue_length);
+                        warn!("{}", msg.clone());
                         let mut transactions: Vec<(String, TransactionData)> = transaction_map
                             .iter()
                             .map(|x| (x.key().to_owned(), x.value().to_owned()))
@@ -103,6 +103,7 @@ impl TxnSenderImpl {
                         let transactions_to_remove = transactions[(max_size + 1)..].to_vec();
                         for (signature, _) in transactions_to_remove {
                             transaction_store.remove_transaction(signature.clone());
+                            transaction_store.add_failed(signature.clone(), msg.clone());
                             transaction_map.remove(&signature);
                         }
                         let records_dropped = queue_length - max_size;
@@ -166,7 +167,8 @@ impl TxnSenderImpl {
                 }
                 // remove transactions that reached max retries
                 for signature in transactions_reached_max_retries {
-                    let _ = transaction_store.remove_transaction(signature);
+                    let _ = transaction_store.remove_transaction(signature.clone());
+                    transaction_store.add_failed(signature, String::from("transaction reached max retries"));
                     statsd_count!("transactions_reached_max_retries", 1);
                 }
                 sleep(Duration::from_secs(txn_send_retry_interval_seconds as u64)).await;
@@ -198,10 +200,10 @@ impl TxnSenderImpl {
             .unwrap_or("none".to_string());
         self.txn_sender_runtime.spawn(async move {
             let confirmed_at = solana_rpc.confirm_transaction(signature.clone()).await;
-            let transcation_data = transaction_store.remove_transaction(signature);
+            let transaction_data = transaction_store.remove_transaction(signature.clone());
             let mut retries = None;
             let mut max_retries = None;
-            if let Some(transaction_data) = transcation_data {
+            if let Some(transaction_data) = transaction_data {
                 retries = Some(transaction_data.retry_count as i32);
                 max_retries = Some(transaction_data.max_retries as i32);
             }
@@ -220,6 +222,7 @@ impl TxnSenderImpl {
                 statsd_count!("transactions_not_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_not_landed_by_key", 1, "api_key" => &api_key);
                 statsd_count!("transactions_not_landed_retries", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
+                transaction_store.add_failed(signature, String::from("transaction not landed"));
                 "false"
             };
             statsd_time!("transaction_priority", priority, "landed" => &landed);

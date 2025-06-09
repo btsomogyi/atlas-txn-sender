@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
+use tokio::time::{Duration, sleep};
 use cadence_macros::{statsd_count, statsd_time};
 use jsonrpsee::{
     core::{async_trait, RpcResult},
@@ -12,7 +13,7 @@ use solana_sdk::transaction::VersionedTransaction;
 use solana_transaction_status::UiTransactionEncoding;
 
 use crate::{
-    errors::invalid_request,
+    errors::{invalid_request, failed_transaction},
     transaction_store::{TransactionData, TransactionStore},
     txn_sender::TxnSender,
     vendor::solana_rpc::decode_and_deserialize,
@@ -132,6 +133,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
     }
     async fn send_transaction_bundle(&self, mut requests: Vec<RpcRequest>) -> Vec<RpcResult<String>> {
         let mut results = vec![];
+        let transaction_store = self.transaction_store.clone();
         for request in requests.drain(..) {
             // Refactor to simulate transaction prior to submitting
             let result = self.send_transaction(
@@ -139,13 +141,25 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
                 request.params,
                 request.metadata)
                 .await;
-            match result {
-                Ok(_) => results.push(result),
+            let signature;
+            match &result {
+                Ok(sig) => {
+                    signature = sig.clone();
+                    results.push(result);
+                },
                 Err(_) => {
                     results.push(result);
-                    break  // Stop processing on unsuccessful transaction
+                    break  // Stop processing on invalid transaction
                 }
             };
+            while transaction_store.has_signature(&signature) {
+                sleep(Duration::from_millis(100)).await;
+            }
+            let failed = transaction_store.remove_failed(signature.clone());
+            if let Some(err) = failed {
+                results.push(RpcResult::Err(failed_transaction(&err)));
+                break  // Stop processing batch on unsuccessful transaction
+            }
         }
         results
     }
@@ -160,8 +174,3 @@ fn validate_send_transaction_params(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-   #[test]
-   fn build_transaction() {}
-}
