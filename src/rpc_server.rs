@@ -26,6 +26,14 @@ pub struct RequestMetadata {
     pub api_key: String,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
+pub struct RpcRequest {
+    txn: String,
+    params: RpcSendTransactionConfig,
+    metadata: Option<RequestMetadata>,
+}
+
 #[rpc(server)]
 pub trait AtlasTxnSender {
     #[method(name = "health")]
@@ -37,6 +45,11 @@ pub trait AtlasTxnSender {
         params: RpcSendTransactionConfig,
         request_metadata: Option<RequestMetadata>,
     ) -> RpcResult<String>;
+    #[method(name = "sendTransactionBundle")]
+    async fn send_transaction_bundle(
+        &self,
+        requests: Vec<RpcRequest>,
+    ) -> Vec<RpcResult<String>>;
 }
 
 pub struct AtlasTxnSenderImpl {
@@ -117,6 +130,25 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         );
         Ok(signature)
     }
+    async fn send_transaction_bundle(&self, mut requests: Vec<RpcRequest>) -> Vec<RpcResult<String>> {
+        let mut results = vec![];
+        for request in requests.drain(..) {
+            // Refactor to simulate transaction prior to submitting
+            let result = self.send_transaction(
+                request.txn,
+                request.params,
+                request.metadata)
+                .await;
+            match result {
+                Ok(_) => results.push(result),
+                Err(_) => {
+                    results.push(result);
+                    break  // Stop processing on unsuccessful transaction
+                }
+            };
+        }
+        results
+    }
 }
 
 fn validate_send_transaction_params(
@@ -126,4 +158,10 @@ fn validate_send_transaction_params(
         return Err(invalid_request("running preflight check is not supported"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+   #[test]
+   fn build_transaction() {}
 }
